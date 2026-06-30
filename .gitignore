@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 测试 / 类型检查缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 构建产物
+build/
+dist/
+*.egg-info/
+
+# 环境变量与密钥
+.env
+.env.*
+
+# 数据库 / 本地数据
+*.db
+*.sqlite
+*.sqlite3
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.swp
+
+# 操作系统
+.DS_Store
+Thumbs.db
