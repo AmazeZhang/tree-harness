@@ -112,7 +112,7 @@ class CambiumEngine:
                 energy=self.config.initial_energy,
                 maturity=self.config.initial_maturity,
             )
-            self.tree_store.insert_cell(cell)
+            self.tree_store.insert_cell(cell, episode_id=step.episode_id)
 
             # Step C: Connect
             self._connect(cell, step.episode_id)
@@ -230,9 +230,15 @@ class CambiumEngine:
     def _parse_preconditions(self, raw: list) -> List[Precondition]:
         preconditions: List[Precondition] = []
         for pc in raw:
+            # 兼容 LLM 返回字符串或 dict 两种格式
+            if isinstance(pc, str):
+                pc = {"assertion": pc}
             verify_hint = None
             vh = pc.get("verify_hint")
             if vh:
+                # verify_hint 也可能是字符串
+                if isinstance(vh, str):
+                    vh = {"type": "file_grep", "params": {"pattern": vh}}
                 verify_hint = VerifyHint(
                     type=vh.get("type", "file_grep"),
                     params=vh.get("params", {}),

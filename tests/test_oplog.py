@@ -200,6 +200,37 @@ def test_count_promotes_by_reason(oplog):
     assert ep1_only == {"normal": 1, "overflow_force": 1, "overflow_demote": 1}
 
 
+# count_by_raw_op 按底层 op_type 统计 (区分 PROMOTE vs MERGE/DEMOTE/SPLIT)
+def test_count_by_raw_op(oplog):
+    oplog.append(OpEnum.PROMOTE, {"cell_id": "c1", "from_ring": "L0", "to_ring": "L1"}, "ep1")
+    oplog.append(OpEnum.MERGE, {"source_ids": ["c2", "c3"], "target_id": "c4"}, "ep1")
+    oplog.append(OpEnum.MERGE, {"source_ids": ["c5", "c6"], "target_id": "c7"}, "ep1")
+    oplog.append(OpEnum.DEMOTE, {"cell_id": "c8", "from_ring": "L2", "to_ring": "L1"}, "ep1")
+    oplog.append(OpEnum.PROMOTE, {"cell_id": "c9", "from_ring": "L1", "to_ring": "L2"}, "ep2")
+
+    # 全局统计
+    raw = oplog.count_by_raw_op()
+    assert raw["PROMOTE"] == 2    # 真实 ring promotion
+    assert raw["MERGE"] == 2      # merge 操作
+    assert raw["DEMOTE"] == 1      # demote 操作
+    assert raw["SPLIT"] == 0
+    assert raw["INSERT_CELL"] == 0
+
+    # 按 episode 过滤
+    ep1 = oplog.count_by_raw_op(episode_id="ep1")
+    assert ep1["PROMOTE"] == 1
+    assert ep1["MERGE"] == 2
+    assert ep1["DEMOTE"] == 1
+
+    ep2 = oplog.count_by_raw_op(episode_id="ep2")
+    assert ep2["PROMOTE"] == 1
+    assert ep2["MERGE"] == 0
+
+    # 与 count_by_op_type 对比: PROMOTE 算符聚合了 PROMOTE+MERGE+DEMOTE
+    ops = oplog.count_by_op_type()
+    assert ops["PROMOTE"] == 5  # 2 PROMOTE + 2 MERGE + 1 DEMOTE
+
+
 # I-Op2 映射表完整性: 每个枚举成员都有映射
 def test_op_to_operator_covers_all_ops():
     """import-time assert 的运行时验证: OP_TO_OPERATOR 覆盖全部 OpEnum。"""

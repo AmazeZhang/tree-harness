@@ -327,3 +327,46 @@ class TestEdgeCases:
         """空候选列表 → 空结果。"""
         verdicts = sentinel.funnel_verify([])
         assert verdicts == {}
+
+
+# ---------------------------------------------------------------------------
+# P1-1: 高 ring 抽检
+# ---------------------------------------------------------------------------
+class TestHighRingSampling:
+    """L3/L4 cell 定期抽检,不依赖 energy threshold。"""
+
+    def test_sample_returns_l3_l4_cells(self, sentinel, tree):
+        """sample_high_ring_cells 只返回 L3/L4 active cell。"""
+        tree.insert_cell(_cell("l0", ring="L0", energy_val=0.5))
+        tree.insert_cell(_cell("l1", ring="L1", energy_val=0.5))
+        tree.insert_cell(_cell("l3a", ring="L3", energy_val=5.0))
+        tree.insert_cell(_cell("l3b", ring="L3", energy_val=3.0))
+        tree.insert_cell(_cell("l4", ring="L4", energy_val=10.0))
+
+        sampled = sentinel.sample_high_ring_cells(sample_size=10)
+        # 只包含 L3/L4 cell
+        assert all(cid in ("l3a", "l3b", "l4") for cid in sampled)
+        assert len(sampled) == 3  # 全部 3 个
+
+    def test_sample_respects_size_limit(self, sentinel, tree):
+        """sample_size 限制返回数量。"""
+        for i in range(10):
+            tree.insert_cell(_cell(f"l3_{i}", ring="L3", energy_val=1.0))
+
+        sampled = sentinel.sample_high_ring_cells(sample_size=3)
+        assert len(sampled) == 3
+
+    def test_sample_empty_rings(self, sentinel, tree):
+        """无 L3/L4 cell → 空列表。"""
+        tree.insert_cell(_cell("l0", ring="L0"))
+        assert sentinel.sample_high_ring_cells(sample_size=5) == []
+
+    def test_sample_excludes_non_active(self, sentinel, tree):
+        """quarantined/archived 的 L3/L4 cell 不被抽取。"""
+        tree.insert_cell(_cell("active", ring="L3", energy_val=1.0))
+        tree.insert_cell(_cell("quarantined", ring="L3", energy_val=1.0))
+        tree.quarantine("quarantined", reason="test")
+
+        sampled = sentinel.sample_high_ring_cells(sample_size=10)
+        assert "quarantined" not in sampled
+        assert "active" in sampled

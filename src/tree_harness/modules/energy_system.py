@@ -23,7 +23,7 @@ class EnergyConfig:
 
     # 每 episode 乘性衰减
     decay_rates: dict = field(default_factory=lambda: {
-        "L0": 0.30,
+        "L0": 0.15,
         "L1": 0.10,
         "L2": 0.03,
         "L3": 0.01,
@@ -36,7 +36,8 @@ class EnergyConfig:
     e_norm: float = 1.0    # 归一化尺度
 
     # 腐朽候选阈值
-    energy_threshold: float = -0.20
+    energy_threshold: float = -0.20           # 负能量 (challenge 产生)
+    zombie_energy_threshold: float = 0.05      # 近零能量 (自然衰减产生, zombie 检测)
     idle_thresholds: dict = field(default_factory=lambda: {
         "L0": 2, "L1": 8, "L2": 30, "L3": 100, "L4": 500,
     })
@@ -48,6 +49,17 @@ class EnergySystem:
     def __init__(self, config: EnergyConfig, tree_store: TreeStore):
         self.config = config
         self.tree_store = tree_store
+        # episode 追踪 (用于 idle 检测)
+        self._episode_count = 0
+        self._cell_last_ref: dict[str, int] = {}       # cell_id → 最近一次 reference 的 episode
+        self._cell_creation_ep: dict[str, int] = {}     # cell_id → 首次发现的 episode
+
+    # ------------------------------------------------------------------
+    # episode 计数 (idle 检测用,由 OuterHarness.after_episode 调用)
+    # ------------------------------------------------------------------
+    def advance_episode(self) -> None:
+        """推进一个 episode (在 decay_all 之后调用)。"""
+        self._episode_count += 1
 
     # ------------------------------------------------------------------
     def _decay_rate(self, cell) -> float:
@@ -68,6 +80,7 @@ class EnergySystem:
             return False
         new_energy = cell.energy + self.config.delta_reference
         self.tree_store.update_energy(cell_id, new_energy, "reference", episode_id)
+        self._cell_last_ref[cell_id] = self._episode_count
         return True
 
     def challenge(self, cell_id: str, episode_id: str) -> bool:
@@ -101,6 +114,9 @@ class EnergySystem:
     def decay_all(self, episode_id: str) -> None:
         """对所有 active cell 执行自然衰减: energy *= (1 - decay_rate[ring])。"""
         for cell in self.tree_store.sqlite.list_active():
+            # 追踪 cell 首次发现 (用于 idle 检测中的"从未被引用"判定)
+            if cell.id not in self._cell_creation_ep:
+                self._cell_creation_ep[cell.id] = self._episode_count
             rate = self._decay_rate(cell)
             if rate == 0.0:
                 continue
@@ -132,15 +148,50 @@ class EnergySystem:
     # 候选查询
     # ------------------------------------------------------------------
     def get_decay_candidates(self, limit: Optional[int] = None) -> List[str]:
-        """返回 energy < energy_threshold 的 active cell id。
+        """返回需要 DecaySentinel 验证的 cell id 列表。
+
+        三通道检测:
+        1. 负能量通道: energy < energy_threshold (challenge 产生)
+        2. Zombie 通道: energy < zombie_energy_threshold (自然衰减产生)
+        3. Idle 通道: 超过 idle_threshold 个 episode 未被 reference
 
         limit 用于 OuterHarness after_step 抽样验证 (funnel_sample_size)。
-        (idle 判定依赖 ray 拓扑时间戳,由 DecaySentinel 在 Phase 3 补充。)
         """
-        cells = self.tree_store.sqlite.query_decay_candidates(
-            self.config.energy_threshold, limit=limit
+        all_active = self.tree_store.sqlite.list_active()
+
+        # 通道 1: 负能量 (原有,从 SQLite 查询)
+        energy_candidates = self.tree_store.sqlite.query_decay_candidates(
+            self.config.energy_threshold, limit=None
         )
-        return [c.id for c in cells]
+        candidate_ids = {c.id for c in energy_candidates}
+
+        # 通道 2 + 3: Zombie + Idle
+        for cell in all_active:
+            # user_directive cell 永不衰减
+            if cell.source == "user_directive":
+                continue
+
+            # 通道 2: Zombie — energy 衰减到近零
+            if cell.energy < self.config.zombie_energy_threshold:
+                candidate_ids.add(cell.id)
+                continue  # 已标记,跳过 idle 检查
+
+            # 通道 3: Idle — 超过 idle_threshold 未被 reference
+            idle_threshold = self.config.idle_thresholds.get(cell.ring, 999)
+            last_ref = self._cell_last_ref.get(cell.id)
+            if last_ref is not None:
+                # 曾被引用过: 检查距上次 reference 的 episode 数
+                if self._episode_count - last_ref >= idle_threshold:
+                    candidate_ids.add(cell.id)
+            else:
+                # 从未被引用: 检查距创建的 episode 数
+                creation_ep = self._cell_creation_ep.get(cell.id, self._episode_count)
+                if self._episode_count - creation_ep >= idle_threshold:
+                    candidate_ids.add(cell.id)
+
+        if limit is not None:
+            return list(candidate_ids)[:limit]
+        return list(candidate_ids)
 
     def get_promotion_candidates(self) -> List[Tuple[str, str]]:
         """返回 maturity 跨升层阈值的 cell: [(cell_id, target_ring)] (逐级,禁跳级)。"""

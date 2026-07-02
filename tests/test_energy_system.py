@@ -98,7 +98,7 @@ def test_decay_comparison_l0_vs_l4(energy, tree):
         energy.decay_all(f"ep{i}")
     e0 = tree.get_cell("c0").energy
     e4 = tree.get_cell("c4").energy
-    assert e0 < 0.01        # L0 (decay_rate=0.30) 趋近 0
+    assert e0 < 0.05        # L0 (decay_rate=0.15) 趋近 0
     assert e4 > 0.45        # L4 (decay_rate=0.002) 几乎不变
 
 
@@ -141,3 +141,86 @@ def test_get_decay_candidates_with_limit(energy, tree):
     assert len(all_candidates) == 5
     limited = energy.get_decay_candidates(limit=2)
     assert len(limited) == 2
+
+
+# ===== P0-1: Zombie + Idle 检测 =====
+
+# Zombie 通道: energy 衰减到近零的 cell 应被标记为 decay candidate
+def test_zombie_cell_detected(energy, tree):
+    """L0 cell 经过多次 decay 后 energy≈0, 应出现在 decay candidates 中。"""
+    tree.insert_cell(_cell("zombie", ring="L0", energy=0.5))
+    # 模拟 20 episode 衰减 (不调 advance_episode, 只测 zombie 通道)
+    for i in range(20):
+        energy.decay_all(f"ep{i}")
+    # energy ≈ 0.5 * 0.85^20 ≈ 0.019 < 0.05 (zombie_threshold)
+    assert tree.get_cell("zombie").energy < 0.05
+    candidates = energy.get_decay_candidates()
+    assert "zombie" in candidates
+
+
+# Zombie 通道: user_directive cell 即使 energy 低也不被标记
+def test_user_directive_not_zombie(energy, tree):
+    """user_directive cell 永不衰减, 即使 energy 低也不进 decay candidates。"""
+    tree.insert_cell(_cell("ud", source="user_directive", energy=0.01))
+    candidates = energy.get_decay_candidates()
+    assert "ud" not in candidates
+
+
+# Idle 通道: 曾被引用但超过 idle_threshold 未再被引用 → candidate
+def test_idle_cell_after_reference_stops(energy, tree):
+    """L0 cell 被引用一次后, 超过 2 个 episode 未再引用 → idle candidate。"""
+    tree.insert_cell(_cell("idle", ring="L0", energy=0.5))
+    # 注册 cell (通过 decay_all)
+    energy.decay_all("ep0")
+    energy.advance_episode()  # ep 0 → 1
+
+    # Episode 1: 引用一次
+    energy.reference("idle", "ep1")
+    energy.decay_all("ep1")
+    energy.advance_episode()  # ep 1 → 2
+
+    # Episode 2: 不引用, decay
+    energy.decay_all("ep2")
+    energy.advance_episode()  # ep 2 → 3
+
+    # Episode 3: 检查 — idle_threshold for L0 = 2, last_ref=1, 3-1=2 >= 2 → idle
+    # 但 energy 可能还 > 0.05 (只衰减了 2 次), 所以走 idle 通道而非 zombie 通道
+    candidates = energy.get_decay_candidates()
+    assert "idle" in candidates
+
+
+# Idle 通道: 从未被引用的 cell, 超过 idle_threshold → candidate
+def test_idle_cell_never_referenced(energy, tree):
+    """L0 cell 从未被引用, 超过 2 个 episode → idle candidate。"""
+    tree.insert_cell(_cell("never", ring="L0", energy=0.5))
+    # Episode 0: 发现 cell
+    energy.decay_all("ep0")
+    energy.advance_episode()  # 0 → 1
+
+    # Episode 1: 不引用
+    energy.decay_all("ep1")
+    energy.advance_episode()  # 1 → 2
+
+    # Episode 2: 不引用
+    energy.decay_all("ep2")
+    energy.advance_episode()  # 2 → 3
+
+    # 检查: creation_ep=0, current=3, 3-0=3 >= 2 (L0 idle) → idle
+    # energy 经 3 次 decay = 0.5 * 0.85^3 ≈ 0.307 > 0.05 → 不是 zombie, 走 idle 通道
+    candidates = energy.get_decay_candidates()
+    assert "never" in candidates
+
+
+# 正常 cell (刚被引用) 不应被标记
+def test_active_cell_not_flagged(energy, tree):
+    """刚被引用的 cell, energy 正常 → 不是 decay candidate。"""
+    tree.insert_cell(_cell("healthy", ring="L0", energy=0.5))
+    energy.decay_all("ep0")
+    energy.advance_episode()
+    energy.reference("healthy", "ep1")
+    energy.decay_all("ep1")
+    energy.advance_episode()
+    # current ep = 2, last_ref = 1, 2-1 = 1 < 2 → not idle
+    # energy ≈ 0.5 * 0.85 * (0.5+0.1)*0.85 ≈ 0.46 > 0.05 → not zombie
+    candidates = energy.get_decay_candidates()
+    assert "healthy" not in candidates

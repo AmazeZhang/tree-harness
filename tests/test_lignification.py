@@ -65,6 +65,13 @@ def _cell(cid, ring="L0", maturity=0.0, energy_val=0.5, source="distilled",
     )
 
 
+def _age_cells(lignification, cell_ids, age=100):
+    """注册 cell 并设置足够大的 age 以通过 min_maturity_age 检查 (测试辅助)。"""
+    for cid in cell_ids:
+        lignification._cell_birth[cid] = 0
+    lignification._episode_count = max(lignification._episode_count, age)
+
+
 # ---------------------------------------------------------------------------
 # Promote
 # ---------------------------------------------------------------------------
@@ -73,7 +80,8 @@ class TestPromote:
         """测试用例 1: maturity=0.41 的 L1 cell → promote 到 L2。"""
         cell = _cell("c1", ring="L1", maturity=0.41)
         tree.insert_cell(cell)
-        promoted = lignification.check_promotions()
+        _age_cells(lignification, ["c1"])
+        promoted = lignification.check_promotions("ep1")
         assert len(promoted) == 1
         assert promoted[0] == ("c1", "L1", "L2")
         assert tree.get_cell("c1").ring == "L2"
@@ -85,22 +93,24 @@ class TestPromote:
     def test_promote_l0_to_l1(self, lignification, tree):
         cell = _cell("c1", ring="L0", maturity=0.15)
         tree.insert_cell(cell)
-        promoted = lignification.check_promotions()
+        _age_cells(lignification, ["c1"])
+        promoted = lignification.check_promotions("ep1")
         assert ("c1", "L0", "L1") in promoted
 
     def test_no_promote_in_hysteresis_band(self, lignification, tree):
         """测试用例 3: maturity=0.35 的 L1 cell → 不触发 promote 也不 demote。"""
         cell = _cell("c1", ring="L1", maturity=0.35)
         tree.insert_cell(cell)
-        promoted = lignification.check_promotions()
-        demoted = lignification.check_demotions()
+        promoted = lignification.check_promotions("ep1")
+        demoted = lignification.check_demotions("ep1")
         assert len(promoted) == 0
         assert len(demoted) == 0
 
     def test_promote_reason_normal(self, lignification, tree):
         cell = _cell("c1", ring="L1", maturity=0.41)
         tree.insert_cell(cell)
-        lignification.check_promotions()
+        _age_cells(lignification, ["c1"])
+        lignification.check_promotions("ep1")
         history = tree.oplog.get_cell_history("c1")
         promote_ops = [e for e in history if e.op == "PROMOTE"]
         assert len(promote_ops) == 1
@@ -109,7 +119,7 @@ class TestPromote:
     def test_l4_cell_not_promoted(self, lignification, tree):
         cell = _cell("c1", ring="L4", maturity=0.99)
         tree.insert_cell(cell)
-        promoted = lignification.check_promotions()
+        promoted = lignification.check_promotions("ep1")
         assert len(promoted) == 0
 
 
@@ -121,7 +131,7 @@ class TestDemote:
         """测试用例 2: maturity=0.04 的 L1 cell → demote 到 L0。"""
         cell = _cell("c1", ring="L1", maturity=0.04)
         tree.insert_cell(cell)
-        demoted = lignification.check_demotions()
+        demoted = lignification.check_demotions("ep1")
         assert len(demoted) == 1
         assert demoted[0] == ("c1", "L1", "L0")
         assert tree.get_cell("c1").ring == "L0"
@@ -130,13 +140,13 @@ class TestDemote:
         """maturity=0.35 的 L1 cell → 在滞回带内 (0.05 < 0.35 < 0.40)。"""
         cell = _cell("c1", ring="L1", maturity=0.35)
         tree.insert_cell(cell)
-        demoted = lignification.check_demotions()
+        demoted = lignification.check_demotions("ep1")
         assert len(demoted) == 0
 
     def test_l0_not_demoted(self, lignification, tree):
         cell = _cell("c1", ring="L0", maturity=0.01)
         tree.insert_cell(cell)
-        demoted = lignification.check_demotions()
+        demoted = lignification.check_demotions("ep1")
         assert len(demoted) == 0
 
 
@@ -149,7 +159,8 @@ class TestCapacity:
         cell = _cell("c1", ring="L2", maturity=0.65)
         tree.insert_cell(cell)
         # L3 容量 = 60, 远未达到
-        promoted = lignification.check_promotions()
+        _age_cells(lignification, ["c1"])
+        promoted = lignification.check_promotions("ep1")
         assert len(promoted) == 1
 
     def test_capacity_overflow_force_promote(self, tree, energy, llm):
@@ -165,7 +176,8 @@ class TestCapacity:
         # 新 cell 从 L2 升 L3 → 触发 overflow
         cell = _cell("c1", ring="L2", maturity=0.65)
         tree.insert_cell(cell)
-        promoted = lignification.check_promotions()
+        _age_cells(lignification, ["c1", "existing0", "existing1"])
+        promoted = lignification.check_promotions("ep1")
         # c1 应直接升到 L4 (overflow_force)
         assert any(p[0] == "c1" and p[2] == "L4" for p in promoted)
 
@@ -179,7 +191,8 @@ class TestCapacity:
         tree.insert_cell(_cell("existing", ring="L3", maturity=0.70))
         cell = _cell("c1", ring="L2", maturity=0.65)
         tree.insert_cell(cell)
-        promoted = lignification.check_promotions()
+        _age_cells(lignification, ["c1", "existing"])
+        promoted = lignification.check_promotions("ep1")
         assert len(promoted) == 0  # blocked
 
 
@@ -229,8 +242,8 @@ class TestMerge:
         merged = tree.get_cell(merged_id)
         assert merged.energy == pytest.approx(0.8 * 0.8)
 
-    def test_merge_maturity_is_mean(self, lignification, tree, llm):
-        """测试用例 6: merge 后新 cell 的 maturity = mean(sources)。"""
+    def test_merge_maturity_is_max(self, lignification, tree, llm):
+        """测试用例 6: merge 后新 cell 的 maturity = max(sources) (保留最高,不拉低)。"""
         cells = [
             _cell("c0", ring="L1", maturity=0.20, energy_val=0.5, domain_tags=["x"]),
             _cell("c1", ring="L1", maturity=0.30, energy_val=0.5, domain_tags=["x"]),
@@ -241,7 +254,7 @@ class TestMerge:
         llm.inject("knowledge consolidation", '{"decision": "d", "rationale": "r"}')
         merged_id = lignification.attempt_merge(["c0", "c1", "c2"], episode_id="ep1")
         merged = tree.get_cell(merged_id)
-        assert merged.maturity == pytest.approx(0.30)
+        assert merged.maturity == pytest.approx(0.40)  # max, not mean(0.30)
 
     def test_merge_source_status_superseded(self, lignification, tree, llm):
         """测试用例 7: merge 后源 cell 的 status = superseded。"""
@@ -318,6 +331,7 @@ class TestMaintenanceCycle:
         tree.insert_cell(_cell("c3", ring="L0", maturity=0.05, energy_val=0.3,
                                decision="same decision", rationale="same rationale",
                                domain_tags=["merge"]))
+        _age_cells(lignification, ["c1", "c2", "c3"])
 
         llm.inject("knowledge consolidation", '{"decision": "merged", "rationale": "merged r"}')
         result = lignification.run_maintenance_cycle("ep1")
@@ -334,12 +348,13 @@ class TestMaintenanceCycle:
         assert result.demoted == []
         assert result.merged == []
         assert result.split == []
-        assert result.op_counts == {"PROMOTE": 0, "DEMOTE": 0, "MERGE": 0, "SPLIT": 0}
+        assert result.op_counts == {"PROMOTE": 0, "DEMOTE": 0, "MERGE": 0, "SPLIT": 0, "ARCHIVE": 0}
 
     def test_op_counts_correct(self, lignification, tree):
         """op_counts 正确统计。"""
         tree.insert_cell(_cell("c1", ring="L1", maturity=0.41))
         tree.insert_cell(_cell("c2", ring="L1", maturity=0.03))
+        _age_cells(lignification, ["c1", "c2"])
         result = lignification.run_maintenance_cycle("ep1")
         assert result.op_counts["PROMOTE"] == 1
         assert result.op_counts["DEMOTE"] == 1
@@ -379,3 +394,98 @@ class TestFindMergeCandidates:
         candidates = lignification._find_merge_candidates()
         found = any("c1" in cluster and "c2" in cluster for cluster in candidates)
         assert not found
+
+
+# ---------------------------------------------------------------------------
+# P0-2: L0 Capacity Cap + Archive
+# ---------------------------------------------------------------------------
+class TestL0CapacityEviction:
+    """L0 容量溢出时淘汰最低 energy 的 cell。"""
+
+    @pytest.fixture
+    def small_lignification(self, tree, energy, llm):
+        """L0 capacity=3 的小配置。"""
+        config = LignificationConfig(ring_capacity={"L0": 3, "L1": 30, "L2": 20, "L3": 60, "L4": 20})
+        return LignificationScheduler(tree, energy, llm, tree.oplog, config)
+
+    def test_l0_overflow_archives_lowest_energy(self, small_lignification, tree):
+        """L0 超过 capacity → archive 最低 energy 的 cell。"""
+        # 插入 4 个 L0 cell (capacity=3, 超出 1 个)
+        tree.insert_cell(_cell("c1", energy_val=0.50))
+        tree.insert_cell(_cell("c2", energy_val=0.30))
+        tree.insert_cell(_cell("c3", energy_val=0.10))   # 最低 energy
+        tree.insert_cell(_cell("c4", energy_val=0.40))
+        _age_cells(small_lignification, ["c1", "c2", "c3", "c4"])
+
+        result = small_lignification.run_maintenance_cycle("ep1")
+
+        assert len(result.archived) == 1
+        assert "c3" in result.archived  # 最低 energy 的被淘汰
+        assert result.op_counts["ARCHIVE"] == 1
+        assert tree.get_cell("c3").status == "archived"
+        # 其他 cell 不受影响
+        assert tree.get_cell("c1").status == "active"
+        assert tree.get_cell("c2").status == "active"
+        assert tree.get_cell("c4").status == "active"
+
+    def test_l0_at_capacity_no_archive(self, small_lignification, tree):
+        """L0 未超 capacity → 不 archive。"""
+        tree.insert_cell(_cell("c1", energy_val=0.5))
+        tree.insert_cell(_cell("c2", energy_val=0.3))
+        tree.insert_cell(_cell("c3", energy_val=0.1))  # 正好 capacity=3
+        _age_cells(small_lignification, ["c1", "c2", "c3"])
+
+        result = small_lignification.run_maintenance_cycle("ep1")
+
+        assert len(result.archived) == 0
+        assert tree.get_cell("c3").status == "active"
+
+    def test_user_directive_not_archived(self, small_lignification, tree):
+        """user_directive cell 不被 archive (即使 energy 低)。"""
+        tree.insert_cell(_cell("c1", energy_val=0.5))
+        tree.insert_cell(_cell("c2", energy_val=0.3))
+        tree.insert_cell(_cell("ud", energy_val=0.01, source="user_directive"))
+        tree.insert_cell(_cell("c4", energy_val=0.4))
+        _age_cells(small_lignification, ["c1", "c2", "ud", "c4"])
+
+        result = small_lignification.run_maintenance_cycle("ep1")
+
+        # ud 不应该被 archive (即使 energy=0.01 最低)
+        assert "ud" not in result.archived
+        assert tree.get_cell("ud").status == "active"
+
+
+# ---------------------------------------------------------------------------
+# P2: Merge 阈值优化
+# ---------------------------------------------------------------------------
+class TestMergeThresholdOptimization:
+    """P2: merge_similarity_threshold 从 0.92 降至 0.82。"""
+
+    def test_default_threshold_is_082(self):
+        """默认阈值应为 0.82 (P2 优化后)。"""
+        config = LignificationConfig()
+        assert config.merge_similarity_threshold == 0.82
+
+    def test_identical_cells_still_merged(self, lignification, tree):
+        """相同文本的 cell 在新阈值下仍然被识别为 merge 候选。"""
+        tree.insert_cell(_cell(
+            "c1", ring="L1", maturity=0.2,
+            decision="always use nulls_first in order_by",
+            rationale="PG and MySQL differ on NULL sorting",
+            domain_tags=["sorting"],
+        ))
+        tree.insert_cell(_cell(
+            "c2", ring="L1", maturity=0.2,
+            decision="always use nulls_first in order_by",
+            rationale="PG and MySQL differ on NULL sorting",
+            domain_tags=["sorting"],
+        ))
+        candidates = lignification._find_merge_candidates()
+        found = any("c1" in cluster and "c2" in cluster for cluster in candidates)
+        assert found
+
+    def test_custom_threshold_respected(self, tree, energy, llm):
+        """自定义阈值仍生效。"""
+        config = LignificationConfig(merge_similarity_threshold=0.99)
+        lign = LignificationScheduler(tree, energy, llm, tree.oplog, config)
+        assert lign.config.merge_similarity_threshold == 0.99

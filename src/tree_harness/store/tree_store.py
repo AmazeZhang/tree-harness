@@ -57,6 +57,12 @@ class TreeStore:
         self.kuzu = kuzu
         self.oplog = oplog
 
+    def clear(self) -> None:
+        """清空所有存储 (Runner reset 用)。"""
+        self.sqlite.clear()
+        self.kuzu.clear()
+        self.oplog.clear()
+
     # ==================================================================
     # Cell 生命周期
     # ==================================================================
@@ -246,6 +252,25 @@ class TreeStore:
             "cell_id": cell_id, "flag": flag, "reason": reason,
         }, episode_id)
 
+    def archive_cell(self, cell_id: str, reason: str,
+                     episode_id: Optional[str] = None) -> None:
+        """归档 cell: status→archived + 切断外向 active ray (容量溢出淘汰用)。
+
+        与 quarantine 的区别: archive 是因容量限制淘汰 (cell 本身可能有效),
+        quarantine 是因验证失败隔离 (cell 被判定无效)。
+        """
+        self.oplog.append(OpEnum.ARCHIVE, {
+            "cell_id": cell_id, "reason": reason,
+        }, episode_id)
+        self.sqlite.update_cell(cell_id, status="archived")
+        for ray in self.kuzu.get_outgoing_rays(cell_id):
+            if ray["status"] == "active":
+                self.oplog.append(OpEnum.SEVER_RAY, {
+                    "from_id": ray["from_id"], "to_id": ray["to_id"],
+                    "reason": "archived",
+                }, episode_id)
+                self.kuzu.update_ray_status(ray["from_id"], ray["to_id"], "severed")
+
     # ==================================================================
     # Ray 操作
     # ==================================================================
@@ -415,6 +440,8 @@ class TreeStore:
             self.kuzu.update_cell_ring(payload["cell_id"], payload["to_ring"])
         elif op == OpEnum.QUARANTINE:
             self.sqlite.update_cell(payload["cell_id"], status="quarantined")
+        elif op == OpEnum.ARCHIVE:
+            self.sqlite.update_cell(payload["cell_id"], status="archived")
         elif op == OpEnum.SUPERSEDE:
             self.sqlite.update_cell(payload["old_id"], status="superseded",
                                     superseded_by=payload["new_id"])

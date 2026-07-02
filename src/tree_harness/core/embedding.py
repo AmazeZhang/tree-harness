@@ -53,12 +53,20 @@ class DeterministicEmbedder:
 
 
 class SentenceTransformerEmbedder:
-    """真实 embedding,默认 all-MiniLM-L6-v2 (384 维)。"""
+    """真实 embedding — 支持中英文混合。
 
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        from sentence_transformers import SentenceTransformer
+    模型级缓存: 同一 model_name 在进程内只加载一次,
+    后续实例化直接复用已加载的模型 (~0ms vs 首次 ~5s)。
+    """
 
-        self._model = SentenceTransformer(model_name)
+    # 类级缓存: {model_name: SentenceTransformer}
+    _model_cache: dict = {}
+
+    def __init__(self, model_name: str = "BAAI/bge-base-zh-v1.5"):
+        if model_name not in self._model_cache:
+            from sentence_transformers import SentenceTransformer
+            self._model_cache[model_name] = SentenceTransformer(model_name)
+        self._model = self._model_cache[model_name]
         self._dim = self._model.get_sentence_embedding_dimension()
 
     @property
@@ -67,6 +75,11 @@ class SentenceTransformerEmbedder:
 
     def embed(self, text: str) -> List[float]:
         return self._model.encode(text).tolist()
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        """清空模型缓存 (测试用)。"""
+        cls._model_cache.clear()
 
 
 def embed_cell_text(decision: str, rationale: str) -> str:

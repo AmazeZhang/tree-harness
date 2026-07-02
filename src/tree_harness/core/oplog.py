@@ -32,10 +32,11 @@ class OpEnum(str, enum.Enum):
     DEMOTE = "DEMOTE"
     MERGE = "MERGE"
     SPLIT = "SPLIT"
-    # QUARANTINE (含版本替代、review 标记)
+    # QUARANTINE (含版本替代、review 标记、容量淘汰)
     QUARANTINE = "QUARANTINE"
     SUPERSEDE = "SUPERSEDE"
     MARK_REVIEW = "MARK_REVIEW"
+    ARCHIVE = "ARCHIVE"
     # DECAY
     UPDATE_ENERGY = "UPDATE_ENERGY"
     UPDATE_MATURITY = "UPDATE_MATURITY"
@@ -65,6 +66,7 @@ OP_TO_OPERATOR: dict[str, str] = {
     OpEnum.QUARANTINE.value: "QUARANTINE",
     OpEnum.SUPERSEDE.value: "QUARANTINE",
     OpEnum.MARK_REVIEW.value: "QUARANTINE",
+    OpEnum.ARCHIVE.value: "QUARANTINE",
     # DECAY
     OpEnum.UPDATE_ENERGY.value: "DECAY",
     OpEnum.UPDATE_MATURITY.value: "DECAY",
@@ -160,6 +162,12 @@ class OpLog:
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
 
+    def clear(self) -> None:
+        """清空所有 oplog 记录 (Runner reset 用)。"""
+        self._conn.execute("DELETE FROM oplog_cell_map")
+        self._conn.execute("DELETE FROM oplog")
+        self._conn.commit()
+
     @property
     def conn(self) -> sqlite3.Connection:
         return self._conn
@@ -252,6 +260,27 @@ class OpLog:
             ).fetchall()
         for row in rows:
             result[row["operator"]] = int(row["cnt"])
+        return result
+
+    def count_by_raw_op(self, episode_id: Optional[str] = None) -> dict[str, int]:
+        """按底层 op_type 统计 (不聚合到 5 算符)。
+
+        用于区分 PROMOTE 算符下的真实 ring promotion vs MERGE/DEMOTE/SPLIT。
+        返回所有 OpEnum 值 -> int, 缺失的用 0 填充。
+        """
+        result = {e.value: 0 for e in OpEnum}
+        if episode_id is not None:
+            rows = self._conn.execute(
+                "SELECT op, COUNT(*) AS cnt FROM oplog "
+                "WHERE episode_id = ? GROUP BY op",
+                (episode_id,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT op, COUNT(*) AS cnt FROM oplog GROUP BY op"
+            ).fetchall()
+        for row in rows:
+            result[row["op"]] = int(row["cnt"])
         return result
 
     def count_promotes_by_reason(self, episode_id: Optional[str] = None) -> dict[str, int]:

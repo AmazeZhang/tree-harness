@@ -347,6 +347,9 @@ class TestLignificationIntegration:
             domain_tags=["test"],
         )
         tree.insert_cell(cell)
+        # 预注册 cell 的 birth episode, 让 min_maturity_age 检查通过
+        s["lignification"]._cell_birth["ready-promote"] = 0
+        s["lignification"]._episode_count = 100
 
         # 跑一个 episode
         inner = MockInnerHarness([{

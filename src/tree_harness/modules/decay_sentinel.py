@@ -87,6 +87,20 @@ class DecaySentinel:
     # ------------------------------------------------------------------
     # 公开接口
     # ------------------------------------------------------------------
+    def sample_high_ring_cells(self, sample_size: int = 5) -> List[str]:
+        """随机抽取 L3/L4 active cell (不依赖 energy threshold)。
+
+        P1-1: 解决 L3/L4 不死性 — 即使 energy 为正,也定期抽检高 ring cell。
+        """
+        import random
+        high_ring_cells = self.tree_store.list_by_ring(
+            ["L3", "L4"], status="active",
+        )
+        if not high_ring_cells:
+            return []
+        k = min(sample_size, len(high_ring_cells))
+        return [c.id for c in random.sample(high_ring_cells, k)]
+
     def funnel_verify(
         self,
         candidate_ids: List[str],

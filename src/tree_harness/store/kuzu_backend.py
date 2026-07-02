@@ -58,6 +58,10 @@ class KuzuBackend:
             rows.append(dict(zip(cols, row)))
         return rows
 
+    def clear(self) -> None:
+        """清空所有节点和关系 (Runner reset 用)。"""
+        self._execute("MATCH (n:CellRef) DETACH DELETE n")
+
     # ------------------------------------------------------------------
     # Node 操作
     # ------------------------------------------------------------------

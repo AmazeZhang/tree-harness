@@ -126,6 +126,11 @@ class OuterHarnessConfig:
     lignification_per_episode: bool = True
     maintenance_funnel_per_episode: bool = True
     funnel_sample_size: int = 10
+    high_ring_sample_size: int = 5       # P1-1: 每 episode 抽检 L3/L4 cell 数量
+    dynamic_pinned_budget: bool = True  # P1-2: pinned budget 随 L3/L4 数量自适应
+    pinned_tokens_per_cell: int = 120   # P1-2: 每 cell 估算 token 数
+    pinned_budget_floor_ratio: float = 0.10  # pinned 下限
+    pinned_budget_cap_ratio: float = 0.50    # pinned 上限
     entropy_weight_compressed: float = 1.0
     entropy_weight_quarantined: float = 2.0
     entropy_weight_decayed: float = 0.5
@@ -186,14 +191,25 @@ class OuterHarness:
         neighbor_entries = self._neighbor_warning_queue.pop(episode_id, [])
         all_warning_texts = warnings_entries + neighbor_entries
 
-        # 2. Budget 分配
-        total = self.config.total_context_tokens
-        pinned_budget = int(total * self.config.pinned_ratio)
-        relevant_budget = int(total * self.config.relevant_ratio)
-        warnings_budget = total - pinned_budget - relevant_budget
-
-        # 3. Pinned: L3/L4 无条件注入
+        # 2. Pinned: L3/L4 无条件注入 (提前查,用于动态 budget)
         pinned_cells = self.tree_store.list_by_ring(["L3", "L4"], status="active")
+
+        # 2b. P1-2: 动态 Budget 分配
+        total = self.config.total_context_tokens
+        warnings_budget = int(total * self.config.warnings_ratio)
+        if self.config.dynamic_pinned_budget:
+            estimated = int(
+                len(pinned_cells) * self.config.pinned_tokens_per_cell * 1.2
+            )
+            pinned_budget = min(
+                max(estimated, int(total * self.config.pinned_budget_floor_ratio)),
+                int(total * self.config.pinned_budget_cap_ratio),
+            )
+        else:
+            pinned_budget = int(total * self.config.pinned_ratio)
+        relevant_budget = max(total - pinned_budget - warnings_budget, 0)
+
+        # 3. Pinned 注入
         pinned_text = self.context_injector.format_pinned(
             pinned_cells, budget=pinned_budget,
         )
@@ -317,6 +333,35 @@ class OuterHarness:
             self.energy_system.decay_all(ep_id)
             self.energy_system.update_all_maturity(ep_id)
 
+        # 2.5 推进 episode 计数 (idle 检测用,在 decay 之后、lignification 之前)
+        self.energy_system.advance_episode()
+
+        # 2.6 P1-1: 高 ring 抽检 — 随机抽 L3/L4 cell 做 funnel_verify
+        # (不依赖 energy threshold,防止 L3/L4 不死)
+        if self.decay_sentinel is not None and self.config.high_ring_sample_size > 0:
+            high_ring_ids = self.decay_sentinel.sample_high_ring_cells(
+                self.config.high_ring_sample_size,
+            )
+            if high_ring_ids:
+                verdicts = self.decay_sentinel.funnel_verify(
+                    high_ring_ids, episode_id=ep_id,
+                )
+                for cell_id, v in verdicts.items():
+                    if v.result == "decayed":
+                        cell = self.tree_store.get_cell(cell_id)
+                        if cell is None:
+                            continue
+                        self.tree_store.quarantine(
+                            cell_id, reason=v.reason, episode_id=ep_id,
+                        )
+                        self._episode_quarantine_count[ep_id] = (
+                            self._episode_quarantine_count.get(ep_id, 0) + 1
+                        )
+                    elif v.result == "uncertain":
+                        self._episode_decayed_count[ep_id] = (
+                            self._episode_decayed_count.get(ep_id, 0) + 1
+                        )
+
         # 3. 木质化 (Phase 4, 可选)
         promoted, demoted = [], []
         if self.lignification is not None and self.config.lignification_per_episode:
@@ -372,6 +417,47 @@ class OuterHarness:
         self._episode_quarantine_count.pop(episode_id, None)
         self._episode_decayed_count.pop(episode_id, None)
         self._episode_compressed_count.pop(episode_id, None)
+
+    # ------------------------------------------------------------------
+    # Runner 支撑: serialize / deserialize / snapshot
+    # ------------------------------------------------------------------
+    def serialize(self) -> dict:
+        """导出可 checkpoint 的状态 (仅元数据,实际数据在 SQLite/Kuzu)。"""
+        return {
+            "type": "tree_outer",
+            "total_cells": self.tree_store.sqlite.count_cells(),
+            "active_cells": self.tree_store.sqlite.count_cells(status="active"),
+        }
+
+    def deserialize(self, state: dict) -> None:
+        """从 checkpoint 恢复 (SQLite/Kuzu 已持久化,此处仅恢复 episode-local 状态)。"""
+        self._pending_warnings.clear()
+        self._neighbor_warning_queue.clear()
+        self._injected_cell_ids.clear()
+        self._episode_new_cells_count.clear()
+        self._episode_quarantine_count.clear()
+        self._episode_decayed_count.clear()
+        self._episode_compressed_count.clear()
+
+    def snapshot_ring_distribution(self) -> dict:
+        """episode 末调用,返回当前 ring 分布。"""
+        return {
+            ring: self.tree_store.sqlite.count_cells(ring=ring, status="active")
+            for ring in ["L0", "L1", "L2", "L3", "L4"]
+        }
+
+    def reset(self) -> None:
+        """trial 起点: 清空所有 cell + ray + episode-local 状态。"""
+        # 清空存储
+        self.tree_store.clear()
+        # 清空 episode-local 状态
+        self._pending_warnings.clear()
+        self._neighbor_warning_queue.clear()
+        self._injected_cell_ids.clear()
+        self._episode_new_cells_count.clear()
+        self._episode_quarantine_count.clear()
+        self._episode_decayed_count.clear()
+        self._episode_compressed_count.clear()
 
     # ------------------------------------------------------------------
     # wrap: 包裹 inner harness

@@ -1,3 +1,51 @@
+# Environment
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual env
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Checkpoints
+checkpoints/
+
+# KuzuDB temp
+/tmp/tree_kuzu_*
+
+# Type checking
+.mypy_cache/
+.ruff_cache/
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Pytest
+.pytest_cache/
 # Python
 __pycache__/
 *.py[cod]

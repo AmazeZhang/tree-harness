@@ -307,11 +307,13 @@ class SQLiteBackend:
         return int(self._conn.execute(sql, params).fetchone()["c"])
 
     def oldest_active_in_ring(self, ring: str, by: str = "maturity") -> Optional[Cell]:
-        """返回指定 ring 中最老 (by=maturity) 或最早创建 (by=created_at) 的 active cell。"""
+        """返回指定 ring 中最老 (by=maturity/energy/created_at) 的 active cell。"""
         if by == "maturity":
             order = "maturity ASC, created_at ASC"
         elif by == "created_at":
             order = "created_at ASC"
+        elif by == "energy":
+            order = "energy ASC, maturity ASC, created_at ASC"
         else:
             order = "created_at ASC"
         row = self._conn.execute(
@@ -321,6 +323,11 @@ class SQLiteBackend:
         return self._row_to_cell(row) if row else None
 
     # ------------------------------------------------------------------
+    def clear(self) -> None:
+        """清空所有 cell (Runner reset 用)。"""
+        self._conn.execute("DELETE FROM cells")
+        self._conn.commit()
+
     def close(self) -> None:
         if self._owns_conn:
             self._conn.close()

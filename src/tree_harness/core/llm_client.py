@@ -117,3 +117,178 @@ def parse_llm_json(response: str) -> dict:
         return json.loads(text)
     except (json.JSONDecodeError, ValueError):
         return {}
+
+
+# ===========================================================================
+# RealLLMClient — 对接真实 LLM API (OpenAI 兼容)
+# ===========================================================================
+class RealLLMClient:
+    """真实 LLM client — 通过 OpenAI 兼容 API 调用 DeepSeek / Qwen。
+
+    特性:
+    - temperature = 0 (确定性输出)
+    - 全量缓存 (相同输入 → 相同输出,重复调用不产生额外开销)
+    - 从 .env 读取 API 配置
+
+    用法:
+        client = RealLLMClient.from_env("qwen")   # 或 "deepseek"
+        response = client.complete("You are...", "Extract...")
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        temperature: float = 0.0,
+        max_tokens: int = 2048,
+        enable_cache: bool = True,
+        log_path: str | None = None,
+    ):
+        from openai import OpenAI
+        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        self._model = model
+        self._temperature = temperature
+        self._max_tokens = max_tokens
+        self._enable_cache = enable_cache
+        self._cache: dict[str, str] = {}
+        self._call_count = 0
+        self._cache_hit_count = 0
+        # Token 用量累计
+        self._prompt_tokens = 0
+        self._completion_tokens = 0
+        self._total_tokens = 0
+        # 调用明细日志
+        self._log_path = log_path
+        if log_path:
+            import os
+            os.makedirs(os.path.dirname(log_path) or ".", exist_ok=True)
+
+    @classmethod
+    def from_env(cls, provider: str = "qwen", **kwargs) -> "RealLLMClient":
+        """从 .env 文件读取配置并创建 client。
+
+        provider: "qwen" 或 "deepseek"
+        """
+        from dotenv import load_dotenv
+        import os
+
+        load_dotenv()
+
+        prefix = provider.upper()
+        api_key = os.environ.get(f"{prefix}_API_KEY", "")
+        base_url = os.environ.get(f"{prefix}_BASE_URL", "")
+        model = os.environ.get(f"{prefix}_MODEL", "")
+
+        if not api_key or not base_url or not model:
+            raise ValueError(
+                f"Missing env vars for {provider}: "
+                f"{prefix}_API_KEY, {prefix}_BASE_URL, {prefix}_MODEL"
+            )
+
+        return cls(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            **kwargs,
+        )
+
+    def complete(self, system_prompt: str, user_prompt: str) -> str:
+        """单轮 completion 调用,返回 LLM 文本响应。"""
+        import time as _time
+
+        cache_key = hashlib.sha256(
+            (system_prompt + "\x00" + user_prompt).encode()
+        ).hexdigest()
+
+        if self._enable_cache and cache_key in self._cache:
+            self._call_count += 1
+            self._cache_hit_count += 1
+            if self._log_path:
+                self._write_call_log(
+                    cache_key, system_prompt, user_prompt,
+                    self._cache[cache_key], 0, 0, 0, 0.0, True,
+                )
+            return self._cache[cache_key]
+
+        t0 = _time.time()
+        response = self._client.chat.completions.create(
+            model=self._model,
+            temperature=self._temperature,
+            max_tokens=self._max_tokens,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        elapsed = _time.time() - t0
+
+        text = response.choices[0].message.content or ""
+
+        # 捕获 token 用量
+        usage = response.usage
+        pt = usage.prompt_tokens if usage else 0
+        ct = usage.completion_tokens if usage else 0
+        tt = usage.total_tokens if usage else 0
+        self._prompt_tokens += pt
+        self._completion_tokens += ct
+        self._total_tokens += tt
+
+        if self._enable_cache:
+            self._cache[cache_key] = text
+
+        self._call_count += 1
+
+        if self._log_path:
+            self._write_call_log(
+                cache_key, system_prompt, user_prompt,
+                text, pt, ct, tt, elapsed, False,
+            )
+
+        return text
+
+    def _write_call_log(
+        self, cache_key: str, system_prompt: str, user_prompt: str,
+        response: str, prompt_tokens: int, completion_tokens: int,
+        total_tokens: int, elapsed: float, cache_hit: bool,
+    ) -> None:
+        """写 LLM 调用明细到 JSONL。"""
+        import json as _json
+        import os as _os
+
+        # 截断 prompt/response 避免日志过大
+        entry = {
+            "call_index": self._call_count,
+            "cache_key": cache_key[:16],
+            "model": self._model,
+            "cache_hit": cache_hit,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "elapsed_seconds": round(elapsed, 3),
+            "system_prompt_preview": system_prompt[:200],
+            "user_prompt_preview": user_prompt[:300],
+            "response_preview": response[:500],
+        }
+        with open(self._log_path, "a") as f:
+            f.write(_json.dumps(entry, ensure_ascii=False) + "\n")
+
+    @property
+    def call_count(self) -> int:
+        return self._call_count
+
+    @property
+    def cache_hit_count(self) -> int:
+        return self._cache_hit_count
+
+    @property
+    def prompt_tokens(self) -> int:
+        return self._prompt_tokens
+
+    @property
+    def completion_tokens(self) -> int:
+        return self._completion_tokens
+
+    @property
+    def total_tokens(self) -> int:
+        return self._total_tokens

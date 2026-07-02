@@ -32,13 +32,24 @@ class LignificationConfig:
     Ring 阈值不在此处定义,唯一权威源是 cell_model.PROMOTE_THRESHOLDS /
     DEMOTE_THRESHOLDS。滞回带 = 0.10 (任意层),由 cell_model 不变量保证。
     """
-    ring_capacity: dict = field(default_factory=lambda: {"L3": 60, "L4": 20})
+    ring_capacity: dict = field(default_factory=lambda: {
+        "L0": 50, "L1": 30, "L2": 20,
+        "L3": 60, "L4": 20,
+    })
     overflow_policy: str = "force_promote"   # "force_promote" | "demote_oldest" | "block_new"
 
     # Merge / split
-    merge_similarity_threshold: float = 0.80
+    merge_similarity_threshold: float = 0.82  # P2: 从 0.92 降低,防止近重复 cell 堆积
     merge_max_cluster_size: int = 5
     enable_split: bool = False               # 默认关闭,仅 LLM 主动发现时启用
+
+    # 防早熟: 升层所需最小成熟期 (episode 数)
+    min_maturity_age: dict = field(default_factory=lambda: {
+        "L0→L1": 3,
+        "L1→L2": 10,
+        "L2→L3": 30,
+        "L3→L4": 100,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +62,8 @@ class MaintenanceResult:
     demoted: List[Tuple[str, str, str]]
     merged: List[Tuple[List[str], str]]     # (source_ids, merged_cell_id)
     split: List[Tuple[str, List[str]]]      # (source_id, child_ids)
-    op_counts: dict                          # {PROMOTE, DEMOTE, MERGE, SPLIT}
+    archived: List[str]                      # P0-2: 容量淘汰的 cell_id
+    op_counts: dict                          # {PROMOTE, DEMOTE, MERGE, SPLIT, ARCHIVE}
 
 
 # ---------------------------------------------------------------------------
@@ -73,35 +85,67 @@ class LignificationScheduler:
         self.llm_client = llm_client
         self.oplog = oplog
         self.config = config
+        # episode 跟踪 (用于 min_maturity_age 检查)
+        self._episode_count = 0
+        self._cell_birth: dict[str, int] = {}
+
+    # ------------------------------------------------------------------
+    # episode 计数 (用于最小成熟期判定)
+    # ------------------------------------------------------------------
+    def advance_episode(self) -> None:
+        """推进一个 episode (在 run_maintenance_cycle 开始时调用)。"""
+        self._episode_count += 1
+
+    def _register_cell(self, cell_id: str) -> None:
+        """记录 cell 创建于当前 episode (若未注册)。"""
+        if cell_id not in self._cell_birth:
+            self._cell_birth[cell_id] = self._episode_count
+
+    def _cell_age(self, cell_id: str) -> int:
+        """cell 自创建以来经过的 episode 数。"""
+        self._register_cell(cell_id)
+        return self._episode_count - self._cell_birth[cell_id]
 
     # ------------------------------------------------------------------
     # Promote (升层)
     # ------------------------------------------------------------------
-    def check_promotions(self) -> List[Tuple[str, str, str]]:
-        """检查并执行所有待升层的 cell,返回 [(cell_id, from_ring, to_ring)]。"""
+    def check_promotions(self, episode_id: str) -> List[Tuple[str, str, str]]:
+        """检查并执行所有待升层的 cell,返回 [(cell_id, from_ring, to_ring)]。
+
+        检查: maturity >= 阈值 AND cell_age >= min_maturity_age。
+        """
         candidates = self.energy_system.get_promotion_candidates()
         promoted: List[Tuple[str, str, str]] = []
         for cell_id, target_ring in candidates:
             cell = self.tree_store.get_cell(cell_id)
             if cell is None or cell.status != "active":
                 continue
+            # 防早熟: 检查最小成熟期
+            self._register_cell(cell_id)
+            age = self._cell_age(cell_id)
+            min_age = self.config.min_maturity_age.get(
+                f"{cell.ring}→{target_ring}", 0,
+            )
+            if age < min_age:
+                continue  # blocked: age 不足
             # 容量检查
-            overflow = self._enforce_capacity(target_ring, cell_id)
+            overflow = self._enforce_capacity(target_ring, cell_id, episode_id)
             if overflow == "block_new":
                 continue
             if overflow == "overflow_force" and target_ring == "L3":
                 # 直接升 L4
                 target_ring = "L4"
-                self._enforce_capacity("L4", cell_id)
+                self._enforce_capacity("L4", cell_id, episode_id)
             # 执行升层
             reason = "overflow_force" if overflow == "overflow_force" else "normal"
             self.tree_store.promote(
-                cell_id, cell.ring, target_ring, reason=reason,
+                cell_id, cell.ring, target_ring,
+                episode_id=episode_id, reason=reason,
             )
             promoted.append((cell_id, cell.ring, target_ring))
         return promoted
 
-    def check_demotions(self) -> List[Tuple[str, str, str]]:
+    def check_demotions(self, episode_id: str) -> List[Tuple[str, str, str]]:
         """检查并执行所有待降层的 cell。"""
         candidates = self.energy_system.get_demotion_candidates()
         demoted: List[Tuple[str, str, str]] = []
@@ -110,7 +154,8 @@ class LignificationScheduler:
             if cell is None or cell.status != "active":
                 continue
             self.tree_store.demote(
-                cell_id, cell.ring, target_ring, reason="normal",
+                cell_id, cell.ring, target_ring,
+                episode_id=episode_id, reason="normal",
             )
             demoted.append((cell_id, cell.ring, target_ring))
         return demoted
@@ -118,15 +163,36 @@ class LignificationScheduler:
     # ------------------------------------------------------------------
     # Capacity enforcement
     # ------------------------------------------------------------------
-    def _enforce_capacity(self, target_ring: str, _incoming_cell_id: str = "") -> Optional[str]:
+    def _enforce_capacity(self, target_ring: str, _incoming_cell_id: str = "",
+                          episode_id: Optional[str] = None) -> Optional[str]:
         """返回触发的 overflow reason,若无溢出返回 None。
 
-        注意: 此方法会执行溢出处理 (demote oldest 等),不仅是检查。
+        注意: 此方法会执行溢出处理 (demote/archive 等),不仅是检查。
+
+        - L0 溢出: archive 最低 energy 的 cell (底部漏斗,清除僵尸)
+        - L1/L2 溢出: demote 最低 maturity 的 cell 到下一层
+        - L3 溢出: force_promote 策略 → 直接升 L4
+        - L4 溢出: demote 最低 maturity 的 cell 到 L3
         """
         if target_ring not in self.config.ring_capacity:
             return None
         active_count = self.tree_store.count_active_by_ring(target_ring)
         if active_count < self.config.ring_capacity[target_ring]:
+            return None
+
+        # L0 特殊处理: 底部漏斗,archive 最低 energy cell
+        if target_ring == "L0":
+            # 找最低 energy 的非 user_directive cell
+            candidates = self.tree_store.list_by_ring([target_ring], status="active")
+            evictable = [c for c in candidates if c.source != "user_directive"
+                         and c.id != _incoming_cell_id]
+            if evictable:
+                victim = min(evictable, key=lambda c: (c.energy, c.maturity))
+                self.tree_store.archive_cell(
+                    victim.id, reason="capacity_overflow",
+                    episode_id=episode_id,
+                )
+                return "archived"
             return None
 
         policy = self.config.overflow_policy
@@ -140,8 +206,9 @@ class LignificationScheduler:
                 idx = RING_ORDER.index(target_ring)
                 if idx > 0:
                     demote_to = RING_ORDER[idx - 1]
-                    self.tree_store.promote(
-                        victim.id, target_ring, demote_to, reason="overflow_demote",
+                    self.tree_store.demote(
+                        victim.id, target_ring, demote_to,
+                        episode_id=episode_id, reason="overflow_demote",
                     )
                 return "overflow_demote"
 
@@ -178,7 +245,7 @@ class LignificationScheduler:
         source_energies = [c.energy for c in cells]
         source_maturities = [c.maturity for c in cells]
         merged_energy = max(source_energies) * 0.8
-        merged_maturity = sum(source_maturities) / len(source_maturities)
+        merged_maturity = max(source_maturities)  # 保留最高成熟度,避免合并拉低
 
         # 确定 ring (基于 maturity)
         merged_ring = self._ring_for_maturity(merged_maturity, cells[0].ring)
@@ -361,8 +428,26 @@ class LignificationScheduler:
     # ------------------------------------------------------------------
     def run_maintenance_cycle(self, episode_id: str) -> MaintenanceResult:
         """执行一轮完整的木质化维护,返回结构化结果。"""
-        promoted = self.check_promotions()
-        demoted = self.check_demotions()
+        # 先注册当前所有 active cell (在 advance_episode 之前,这样新 cell 的 birth = 当前 episode)
+        for cell in self.tree_store.sqlite.list_active():
+            self._register_cell(cell.id)
+        self.advance_episode()
+        promoted = self.check_promotions(episode_id)
+        demoted = self.check_demotions(episode_id)
+
+        # 容量扫描: 检查所有有 capacity 限制的 ring
+        # (check_promotions 只检查升层目标 ring,这里补充检查所有 ring)
+        archived: List[str] = []
+        for ring in RING_ORDER:
+            if ring in self.config.ring_capacity:
+                active_count = self.tree_store.count_active_by_ring(ring)
+                if active_count > self.config.ring_capacity[ring]:
+                    result = self._enforce_capacity(ring, episode_id=episode_id)
+                    if result == "archived":
+                        archive_entries = self.oplog.get_entries(op_filter="ARCHIVE")
+                        if archive_entries:
+                            archived.append(archive_entries[-1].payload.get("cell_id", ""))
+
         merged: List[Tuple[List[str], str]] = []
         split: List[Tuple[str, List[str]]] = []
 
@@ -385,12 +470,14 @@ class LignificationScheduler:
             "DEMOTE": len(demoted),
             "MERGE": len(merged),
             "SPLIT": len(split),
+            "ARCHIVE": len(archived),
         }
         return MaintenanceResult(
             promoted=promoted,
             demoted=demoted,
             merged=merged,
             split=split,
+            archived=archived,
             op_counts=op_counts,
         )
 
