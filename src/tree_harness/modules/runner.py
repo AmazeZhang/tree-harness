@@ -61,6 +61,9 @@ class RunnerConfig:
     freeform_rewriter_model: Optional[str] = None
     freeform_rewrite_budget: int = 5
 
+    # mini-swe-agent 专用
+    mini_swe_config: Optional[dict] = None  # MiniSWEConfig 的 dict 形式
+
     # 通用
     repo_path: str = "."
     agent_config: dict = field(default_factory=dict)
@@ -442,8 +445,16 @@ class TreeHarnessRunner:
     def _build_inner(self, config: RunnerConfig) -> InnerHarnessProtocol:
         if config.inner_kind == "mock":
             return config.agent_config.get("inner_factory", lambda: _MockInner())()
+
+        if config.inner_kind == "mini-swe-agent":
+            from tree_harness.adapters.mini_swe_inner import (
+                MiniSWEAgentInner, MiniSWEConfig,
+            )
+            swe_cfg = MiniSWEConfig(**(config.mini_swe_config or {}))
+            return MiniSWEAgentInner(swe_cfg)
+
         # 真实 inner harness 尚未实现 — 返回 mock 并警告
-        # SWE-agent / OpenHands / mini-swe-agent 需要外部依赖
+        # SWE-agent / OpenHands 需要外部依赖
         return _MockInner()
 
     # ------------------------------------------------------------------

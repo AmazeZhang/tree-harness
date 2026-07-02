@@ -476,6 +476,10 @@ class OuterHarness:
                     # Hook 1
                     ctx = outer.before_step(task, step_index, episode_id)
 
+                    # 注入 context 到 inner state (mini-swe-agent 等 real inner 需要)
+                    if hasattr(state, "augment"):
+                        state = state.augment(ctx)
+
                     # Inner step
                     obs = inner.step(state)
 
