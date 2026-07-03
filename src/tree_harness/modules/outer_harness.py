@@ -110,7 +110,8 @@ class EpisodeReport:
     compressed_count: int = 0
     quarantined_count: int = 0
     decayed_count: int = 0
-    op_counts: dict = field(default_factory=dict)
+    op_counts: dict = field(default_factory=dict)           # 5 算符聚合
+    raw_op_counts: dict = field(default_factory=dict)       # 底层 op_type 明细 (P-fix: 避免聚合混淆)
     entropy_released: float = 0.0
 
 
@@ -384,6 +385,7 @@ class OuterHarness:
 
         # 5. OpLog 聚合
         op_counts = self.oplog.count_by_op_type(episode_id=ep_id)
+        raw_op_counts = self.oplog.count_by_raw_op(episode_id=ep_id)
 
         # 6. 清理 episode-local 状态
         self._cleanup_episode_state(ep_id)
@@ -396,6 +398,7 @@ class OuterHarness:
             quarantined_count=quarantined_n,
             decayed_count=decayed_n,
             op_counts=op_counts,
+            raw_op_counts=raw_op_counts,
             entropy_released=entropy,
         )
 

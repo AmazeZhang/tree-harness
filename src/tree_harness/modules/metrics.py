@@ -42,7 +42,8 @@ class TaskResult:
     context_retention_score: float = 0.0
     control_lag_steps: float = 0.0
     entropy_released: float = 0.0
-    op_counts: dict = field(default_factory=dict)
+    op_counts: dict = field(default_factory=dict)           # 5 算符聚合
+    raw_op_counts: dict = field(default_factory=dict)       # 底层 op_type 明细 (P-fix)
 
     # 算符明细 (from EpisodeReport)
     new_cells_count: int = 0

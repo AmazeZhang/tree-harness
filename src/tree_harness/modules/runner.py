@@ -350,6 +350,13 @@ class TreeHarnessRunner:
         else:
             self.embedder = DeterministicEmbedder(dim=32)
 
+        # 日志/DB 目录 (须在 _build_outer 之前, 因 SQLiteBackend 需要目录已存在)
+        os.makedirs(config.log_dir, exist_ok=True)
+        if config.db_path and config.db_path != ":memory:":
+            db_dir = os.path.dirname(config.db_path)
+            if db_dir:
+                os.makedirs(db_dir, exist_ok=True)
+
         # 装配
         self.outer = self._build_outer(config)
         self.inner = self._build_inner(config)
@@ -358,9 +365,6 @@ class TreeHarnessRunner:
         # 状态
         self.episode_count = 0
         self._results: List[TaskResult] = []
-
-        # 日志
-        os.makedirs(config.log_dir, exist_ok=True)
 
     # ------------------------------------------------------------------
     # 装配逻辑
@@ -395,12 +399,16 @@ class TreeHarnessRunner:
         db_path = config.db_path or ":memory:"
         sqlite = SQLiteBackend(db_path, embedder=self.embedder)
 
-        # KuzuDB 需要目录路径,每个实例使用独立临时目录避免冲突
-        kuzu_path = config.db_path if config.db_path and config.db_path != ":memory:" else None
-        if kuzu_path is None:
+        # KuzuDB 需要文件路径 (非目录),从 db_path 推导独立路径避免冲突
+        if config.db_path and config.db_path != ":memory:":
+            kuzu_path = os.path.join(
+                os.path.dirname(config.db_path),
+                os.path.basename(config.db_path).replace(".db", "") + "_kuzu.db",
+            )
+        else:
             kuzu_path = os.path.join(
                 tempfile.gettempdir(),
-                f"tree_kuzu_{_uuid.uuid4().hex[:8]}",
+                f"tree_kuzu_{_uuid.uuid4().hex[:8]}.db",
             )
         kuzu = KuzuBackend(kuzu_path)
         oplog = OpLog(":memory:")
@@ -491,6 +499,7 @@ class TreeHarnessRunner:
             token_usage=record.token_usage,
             n_steps=len(record.steps),
             op_counts=report.op_counts,
+            raw_op_counts=report.raw_op_counts,
             entropy_released=report.entropy_released,
             new_cells_count=report.new_cells_count,
             compressed_count=report.compressed_count,
