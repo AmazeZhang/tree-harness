@@ -150,6 +150,26 @@ class MiniSWEAgentInner:
         self.config = config or MiniSWEConfig()
         self._agent: Optional[_DEFAULT_AGENT] = None
         self._state: Optional[MiniSWEState] = None
+        # 外部注入的环境/模型 (用于 SWE-bench Docker 等场景)
+        self._external_env = None
+        self._external_model = None
+
+    # ------------------------------------------------------------------
+    # 外部注入 (SWE-bench Docker 等)
+    # ------------------------------------------------------------------
+    def set_environment(self, env) -> None:
+        """注入预配置的环境 (如 SWE-bench 的 DockerEnvironment)。
+
+        调用后 reset() 将使用此环境而非创建 LocalEnvironment。
+        """
+        self._external_env = env
+
+    def set_model(self, model) -> None:
+        """注入预配置的 model (如带 SWE-bench 模板配置的 litellm model)。
+
+        调用后 reset() 将使用此 model 而非自行创建。
+        """
+        self._external_model = model
 
     # ------------------------------------------------------------------
     # InnerHarnessProtocol
@@ -164,13 +184,18 @@ class MiniSWEAgentInner:
         """
         cfg = self.config
 
-        # 构建 Model (drop_params=False 确保 tools 参数不被 litellm 丢弃)
-        model = _GET_MODEL(cfg.model_name, config={
-            "model_kwargs": {"drop_params": False},
-        })
+        # 构建 Model: 优先用外部注入 (SWE-bench), 否则自行创建
+        if self._external_model is not None:
+            model = self._external_model
+        else:
+            model = _GET_MODEL(cfg.model_name, config={
+                "model_kwargs": {"drop_params": False},
+            })
 
-        # 构建 Environment
-        if cfg.env_kind == "local":
+        # 构建 Environment: 优先用外部注入 (SWE-bench Docker), 否则按 env_kind 创建
+        if self._external_env is not None:
+            env = self._external_env
+        elif cfg.env_kind == "local":
             cwd = cfg.env_cwd or tempfile.mkdtemp(prefix="tree_inner_")
             env = _LOCAL_ENV(cwd=cwd, timeout=cfg.env_timeout)
         else:

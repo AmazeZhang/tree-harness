@@ -46,6 +46,9 @@ checkpoints/
 
 # Pytest
 .pytest_cache/
+
+# HuggingFace cache (local)
+.cache/
 # Python
 __pycache__/
 *.py[cod]
