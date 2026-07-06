@@ -97,26 +97,73 @@ class DeterministicLLMClient:
         return response
 
 
-def parse_llm_json(response: str) -> dict:
+def parse_llm_json(response: str) -> dict | list:
     """解析 LLM 返回的 JSON 响应。
 
     处理常见 LLM 输出问题:
     - 前后空白
     - markdown 代码块包裹 (```json ... ```)
-    - 单条或多条 JSON 对象
+    - 多个 JSON 代码块 (LLM 可能返回多条知识)
+    - 截断的 JSON (只取第一个完整块)
     - 无法解析时返回空 dict (不抛异常)
     """
+    import re
+
     text = response.strip()
-    # 去除 markdown 代码块
-    if text.startswith("```"):
-        lines = text.split("\n")
-        # 去首行 (```json) 和末行 (```)
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        text = "\n".join(lines).strip()
+
+    # 策略 1: 提取所有 ```json ... ``` 代码块,逐个解析
+    json_blocks = re.findall(r'```(?:json)?\s*\n(.*?)```', text, re.DOTALL)
+    if json_blocks:
+        results: list = []
+        for block in json_blocks:
+            block = block.strip()
+            try:
+                results.append(json.loads(block))
+            except (json.JSONDecodeError, ValueError):
+                continue
+        if len(results) == 1:
+            return results[0]
+        if len(results) > 1:
+            return results
+
+    # 策略 2: 去除所有 markdown 标记后整体解析
+    clean = re.sub(r'```(?:json)?\s*', '', text).strip()
     try:
-        return json.loads(text)
+        return json.loads(clean)
     except (json.JSONDecodeError, ValueError):
-        return {}
+        pass
+
+    # 策略 3: 花括号匹配,提取第一个完整 JSON 对象
+    first_brace = text.find('{')
+    if first_brace >= 0:
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(first_brace, len(text)):
+            ch = text[i]
+            if escape:
+                escape = False
+                continue
+            if ch == '\\' and in_string:
+                escape = True
+                continue
+            if ch == '"' and not escape:
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[first_brace:i + 1])
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    break
+
+    return {}
 
 
 # ===========================================================================
