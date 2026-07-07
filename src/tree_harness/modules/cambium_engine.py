@@ -153,11 +153,13 @@ class CambiumEngine:
     def _worth_extracting_step(self, step: StandardStep) -> bool:
         if step.outcome_so_far == "error":
             return False
-        if step.outcome_so_far == "pending":
-            if not step.patch_delta and not step.test_results:
-                return False
         if step.outcome_so_far == "fail" and not self._step_has_clear_lesson(step):
             return False
+        # pass (终态成功步): 总是值得蒸馏, 不过滤机械命令
+        if step.outcome_so_far == "pass":
+            return True
+        # pending: 只过滤机械步骤 (ls, cd, cat, pwd, git status, git diff)
+        # 非机械的 pending 步骤 (编辑文件、运行测试等) 即使没有 patch_delta 也值得蒸馏
         if self._is_mechanical_step(step):
             return False
         return True

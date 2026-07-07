@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field
 from typing import Optional, List, Tuple
@@ -273,7 +274,7 @@ class LignificationScheduler:
             decision=merged_content.get("decision", ""),
             rationale=merged_content.get("rationale", ""),
             preconditions=all_preconds,
-            evidence=list(set(all_evidence)),
+            evidence=list({json.dumps(e, sort_keys=True, ensure_ascii=False) if isinstance(e, dict) else e for e in all_evidence}),
             domain_tags=list(all_tags),
             ring=merged_ring,
             maturity=merged_maturity,

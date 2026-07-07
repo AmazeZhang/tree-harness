@@ -20,19 +20,29 @@ import traceback
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# 环境变量: 加载 .env, 设置 Qwen 为 OpenAI 兼容
+# 环境变量: 加载 .env, 支持切换 provider (qwen / deepseek)
 # ---------------------------------------------------------------------------
 from dotenv import load_dotenv
 load_dotenv()
 
-os.environ["OPENAI_API_KEY"] = os.environ.get("QWEN_API_KEY", "")
-os.environ["OPENAI_API_BASE"] = os.environ.get("QWEN_BASE_URL", "")
+PROVIDER = os.environ.get("LLM_PROVIDER", "deepseek")
+
+if PROVIDER == "deepseek":
+    _API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+    _BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "")
+    _MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
+else:
+    _API_KEY = os.environ.get("QWEN_API_KEY", "")
+    _BASE_URL = os.environ.get("QWEN_BASE_URL", "")
+    _MODEL = os.environ.get("QWEN_MODEL", "Qwen3.7-Max-DogFooding")
+
+os.environ["OPENAI_API_KEY"] = _API_KEY
+os.environ["OPENAI_API_BASE"] = _BASE_URL
 os.environ["MSWEA_COST_TRACKING"] = "ignore_errors"
 # HF 缓存放到工作区内 (避免沙箱权限问题)
 os.environ["HF_HOME"] = os.path.join(os.path.dirname(__file__), ".cache", "huggingface")
 
-QWEN_MODEL = os.environ.get("QWEN_MODEL", "Qwen3.7-Max-DogFooding")
-MODEL_NAME = f"openai/{QWEN_MODEL}"
+MODEL_NAME = f"openai/{_MODEL}"
 
 # ---------------------------------------------------------------------------
 # 导入 (在环境变量设置之后)
@@ -50,6 +60,7 @@ from tree_harness.adapters.mini_swe_inner import MiniSWEConfig
 from tree_harness.modules.outer_harness import Task
 from tree_harness.modules.energy_system import EnergyConfig
 from tree_harness.modules.lignification import LignificationConfig
+from tree_harness.modules.context_injector import InjectorConfig
 from tree_harness.core.llm_client import RealLLMClient
 
 
@@ -83,6 +94,7 @@ def run_swebench_tree(
     subset: str = "verified",
     split: str = "test",
     slice_spec: str = "0:5",
+    instance_ids: str = "",
     step_limit: int = 30,
     output_dir: str = "./logs/swebench_tree",
 ):
@@ -95,7 +107,16 @@ def run_swebench_tree(
     instances = list(load_dataset(dataset_path, split=split))
     instances = sorted(instances, key=lambda x: x["instance_id"])
 
-    if slice_spec:
+    # 按指定 instance ID 列表过滤 (逗号分隔)
+    if instance_ids:
+        id_list = [x.strip() for x in instance_ids.split(",") if x.strip()]
+        id_set = set(id_list)
+        instances = [d for d in instances if d["instance_id"] in id_set]
+        # 按指定顺序排列
+        order = {iid: i for i, iid in enumerate(id_list)}
+        instances.sort(key=lambda d: order.get(d["instance_id"], 999))
+        print(f"Filtered to {len(instances)} specified instances")
+    elif slice_spec:
         values = [int(x) if x else None for x in slice_spec.split(":")]
         instances = instances[slice(*values)]
 
@@ -114,9 +135,9 @@ def run_swebench_tree(
 
     # 创建 LLM client (用于 CambiumEngine crystallize, DecaySentinel 等)
     llm_client = RealLLMClient(
-        api_key=os.environ.get("QWEN_API_KEY", ""),
-        base_url=os.environ.get("QWEN_BASE_URL", ""),
-        model=QWEN_MODEL,
+        api_key=_API_KEY,
+        base_url=_BASE_URL,
+        model=_MODEL,
         log_path=str(output_path / "llm_calls.jsonl"),
     )
 
@@ -128,7 +149,7 @@ def run_swebench_tree(
             "model_name": MODEL_NAME,
             "step_limit": step_limit,
             "cost_limit": 0,           # 禁用 (MSWEA_COST_TRACKING=ignore_errors)
-            "wall_time_limit_seconds": 600,
+            "wall_time_limit_seconds": 1800,
         },
         db_path=str(output_path / "tree.db"),
         log_dir=str(output_path),
@@ -141,6 +162,7 @@ def run_swebench_tree(
         lignification_config=LignificationConfig(
             min_maturity_age={"L0→L1": 1, "L1→L2": 10, "L2→L3": 30, "L3→L4": 100}
         ),
+        injector_config=InjectorConfig(min_similarity=0.5),
     )
     runner = TreeHarnessRunner(config)
 
@@ -246,6 +268,7 @@ def run_swebench_tree(
         "subset": subset,
         "split": split,
         "slice": slice_spec,
+        "instance_ids": instance_ids,
         "step_limit": step_limit,
         "model": MODEL_NAME,
         "total_instances": len(instances),
@@ -263,6 +286,7 @@ if __name__ == "__main__":
     parser.add_argument("--subset", default="verified", help="SWE-bench subset")
     parser.add_argument("--split", default="test", help="Dataset split")
     parser.add_argument("--slice", default="0:5", help="Instance slice (e.g., '0:5')")
+    parser.add_argument("--instances", default="", help="Comma-separated instance IDs (overrides --slice)")
     parser.add_argument("--step-limit", type=int, default=30, help="Max steps per instance")
     parser.add_argument("--output", default="./logs/swebench_tree", help="Output directory")
     args = parser.parse_args()
@@ -271,6 +295,7 @@ if __name__ == "__main__":
         subset=args.subset,
         split=args.split,
         slice_spec=args.slice,
+        instance_ids=args.instances,
         step_limit=args.step_limit,
         output_dir=args.output,
     )

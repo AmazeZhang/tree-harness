@@ -113,6 +113,10 @@ class EpisodeReport:
     op_counts: dict = field(default_factory=dict)           # 5 算符聚合
     raw_op_counts: dict = field(default_factory=dict)       # 底层 op_type 明细 (P-fix: 避免聚合混淆)
     entropy_released: float = 0.0
+    # 注入统计 (context injection observability)
+    injected_cell_ids: list = field(default_factory=list)   # 去重后的注入 cell id
+    injection_step_count: int = 0                           # 有 cell 注入的步数
+    injected_token_count: int = 0                           # 全 episode 注入 token 总量
 
 
 @dataclass
@@ -177,6 +181,9 @@ class OuterHarness:
         self._episode_quarantine_count: Dict[str, int] = {}
         self._episode_decayed_count: Dict[str, int] = {}
         self._episode_compressed_count: Dict[str, int] = {}
+        # 注入统计追踪
+        self._episode_injected_tokens: Dict[str, int] = {}
+        self._episode_injection_steps: Dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Hook 1: before_step (只读)
@@ -236,6 +243,19 @@ class OuterHarness:
         # 6. 组装
         injected_ids = [c.id for c in pinned_cells] + relevant_ctx.cells
         self._injected_cell_ids.setdefault(episode_id, []).extend(injected_ids)
+
+        # 6b. 注入统计追踪
+        ctx_token_count = (
+            len(pinned_text.split()) + len(relevant_ctx.formatted_text.split())
+            + len(warnings_text.split())
+        )
+        self._episode_injected_tokens[episode_id] = (
+            self._episode_injected_tokens.get(episode_id, 0) + ctx_token_count
+        )
+        if injected_ids:
+            self._episode_injection_steps[episode_id] = (
+                self._episode_injection_steps.get(episode_id, 0) + 1
+            )
 
         return ContextBlock(
             pinned_text=pinned_text,
@@ -387,6 +407,12 @@ class OuterHarness:
         op_counts = self.oplog.count_by_op_type(episode_id=ep_id)
         raw_op_counts = self.oplog.count_by_raw_op(episode_id=ep_id)
 
+        # 5b. 注入统计
+        all_injected = self._injected_cell_ids.get(ep_id, [])
+        unique_injected = list(set(all_injected))
+        injection_steps = self._episode_injection_steps.get(ep_id, 0)
+        injected_tokens = self._episode_injected_tokens.get(ep_id, 0)
+
         # 6. 清理 episode-local 状态
         self._cleanup_episode_state(ep_id)
 
@@ -400,6 +426,9 @@ class OuterHarness:
             op_counts=op_counts,
             raw_op_counts=raw_op_counts,
             entropy_released=entropy,
+            injected_cell_ids=unique_injected,
+            injection_step_count=injection_steps,
+            injected_token_count=injected_tokens,
         )
 
     def _compute_entropy_released(
@@ -420,6 +449,8 @@ class OuterHarness:
         self._episode_quarantine_count.pop(episode_id, None)
         self._episode_decayed_count.pop(episode_id, None)
         self._episode_compressed_count.pop(episode_id, None)
+        self._episode_injected_tokens.pop(episode_id, None)
+        self._episode_injection_steps.pop(episode_id, None)
 
     # ------------------------------------------------------------------
     # Runner 支撑: serialize / deserialize / snapshot
@@ -441,6 +472,8 @@ class OuterHarness:
         self._episode_quarantine_count.clear()
         self._episode_decayed_count.clear()
         self._episode_compressed_count.clear()
+        self._episode_injected_tokens.clear()
+        self._episode_injection_steps.clear()
 
     def snapshot_ring_distribution(self) -> dict:
         """episode 末调用,返回当前 ring 分布。"""
@@ -461,6 +494,8 @@ class OuterHarness:
         self._episode_quarantine_count.clear()
         self._episode_decayed_count.clear()
         self._episode_compressed_count.clear()
+        self._episode_injected_tokens.clear()
+        self._episode_injection_steps.clear()
 
     # ------------------------------------------------------------------
     # wrap: 包裹 inner harness

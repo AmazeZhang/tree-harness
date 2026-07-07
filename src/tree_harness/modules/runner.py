@@ -511,6 +511,15 @@ class TreeHarnessRunner:
             ring_distribution=ring_dist,
             inner_supports_pin_marker=caps.supports_pin_marker,
             inner_supports_warning_marker=caps.supports_warning_marker,
+            # 注入可观测性指标
+            context_retention_score=(
+                report.injection_step_count / max(len(record.steps), 1)
+            ),
+            outer_overhead_ratio=(
+                report.injected_token_count
+                / max(len(record.steps) * self.config.outer_harness_config.total_context_tokens
+                      if self.config.outer_harness_config else 4000, 1)
+            ),
         )
 
         # freeform_outer 专用
