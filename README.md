@@ -194,9 +194,3 @@ pyenv install 3.12
 - [开发规格](docs/DEVELOPMENT_SPEC.md) — 规格驱动开发的阶段划分
 - [模块规格](docs/specs/) — 各模块的接口与行为契约
 - [相关工作调研](docs/related-work-survey.md)
-
----
-
-## License
-
-MIT
